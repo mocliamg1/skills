@@ -16,7 +16,7 @@ Simplify STM32F042 firmware without changing behavior. Bias toward small, explic
    - `arm-none-eabi-nm --size-sort -S firmware.elf`
    - linker map file
    - stack usage output if available
-4. Attack measured or obvious F042 bloat first: HAL in hot paths, exceptions, RTTI, iostreams, float formatting, dynamic allocation, static initialization, heavy templates, duplicated drivers/state machines, unused peripherals/middleware, large logs/strings/tables, generic parsers/formatters.
+4. Attack measured or obvious F042 bloat first: HAL/default Cube layers, exceptions, RTTI, iostreams, float formatting, dynamic allocation, static initialization, heavy templates, duplicated drivers/state machines, unused peripherals/middleware, large logs/strings/tables, generic parsers/formatters.
 5. Make the smallest behavior-preserving change, rebuild, compare size/behavior, and report deltas plus risks.
 
 ## KISS Rules
@@ -26,6 +26,7 @@ Simplify STM32F042 firmware without changing behavior. Bias toward small, explic
 - Prefer fixed-size storage and explicit ownership over generic containers.
 - Prefer plain functions and small structs over virtual hierarchies in driver code.
 - Prefer simple state machines over callback chains when timing and ownership matter.
+- Prefer STM32CubeF0 LL or raw registers for simple GPIO/RCC/NVIC/DMA/UART/SPI/I2C/timer paths when it improves size, timing, or auditability.
 - Prefer thin templates over large templated implementations.
 - Prefer integer/fixed-point math over floating point; Cortex-M0 has no FPU, so require measurement before keeping float outside cold paths.
 - Prefer compile-time constants only when they reduce code or clarify invariants.
@@ -48,7 +49,7 @@ Prioritize these in MCU C++ projects:
 
 - Replace templated heavy code with a tiny template wrapper over one non-template implementation.
 - Replace virtual interfaces in low-level drivers with compile-time selection, function pointers, or direct calls where appropriate.
-- Replace HAL with LL/direct register code only where size, latency, or clarity improves after measurement.
+- Avoid adding new HAL use by default; replace existing HAL with LL/raw registers where size, latency, ownership, or control-flow clarity improves. Keep HAL only when measured cost is acceptable and it clearly reduces risk.
 - Replace string formatting/logging with fixed event IDs, counters, or compile-time gated logs.
 - Replace scattered flash-emulated setting access with one parameter store and per-module sub-structs.
 - Remove unused peripheral drivers from the build instead of only disabling them at runtime.

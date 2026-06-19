@@ -1,6 +1,6 @@
 # STM32F042 C++ IRQ/DMA Review Guide
 
-Target: STM32F042x4/x6, Cortex-M0, up to 48 MHz, 16/32 KB flash, 6 KB SRAM with parity, 5 DMA channels, CRC unit, no D-cache, four NVIC priority levels. Treat "EEPROM" as flash emulation unless the board has external EEPROM.
+Target: STM32F042x4/x6, Cortex-M0, up to 48 MHz, 16/32 KB flash, 6 KB SRAM with parity, 5 DMA channels, CRC unit, no D-cache, 2 NVIC priority bits: priority 0 highest, 3 lowest. Treat "EEPROM" as flash emulation unless the board has external EEPROM.
 
 ## Review Invariants
 
@@ -46,7 +46,7 @@ Inspect `.text`, `.rodata`, `.data`, `.bss`, stack usage, retained HAL/middlewar
 - ISR = acknowledge source, capture minimal state, publish event, exit.
 - Required comment: trigger, max work, shared state, DMA interaction.
 - Keep work bounded; no blocking, allocation, float math, complex logging, virtual dispatch, protocol parsing, or flash writes.
-- Centralize NVIC setup; document numeric priority and urgency. F0 has only four priority levels, so priority policy must be simple.
+- Centralize NVIC setup; document numeric priority and urgency. F0 has four priority levels: 0 highest, 3 lowest.
 - Handler mode uses the main stack; review ISR stack growth and nested interrupt assumptions.
 
 ## DMA Rules
@@ -62,7 +62,9 @@ Inspect `.text`, `.rodata`, `.data`, `.bss`, stack usage, retained HAL/middlewar
 
 - `volatile` only for MMIO and ISR-observed flags; it is not atomicity.
 - Simple shared operations: naturally aligned byte/halfword/word single load/store.
-- Compound updates, counters, ring push/pop pairs, and multi-field publishes require single-writer ownership or a tiny `PRIMASK` critical section.
+- Do not add global interrupt masking by habit. First map writer, reader, and preemption relationship.
+- Prefer single-writer ownership, natural-width atomic loads/stores, or priority design that prevents preemption.
+- Use a tiny `PRIMASK` critical section only when a compound update, counter, ring push/pop pair, or multi-field publish can be observed or interrupted by a higher-priority IRQ path, or by an ISR preempting thread mode.
 - Critical sections should only snapshot or publish shared state; move parsing, copying large buffers, HAL/LL calls, flash writes, waits, and loops outside the masked region.
 - One writer per ring index; define overflow policy.
 - Do not publish stack pointers or reuse DMA buffers before ownership returns.
@@ -87,7 +89,8 @@ Inspect `.text`, `.rodata`, `.data`, `.bss`, stack usage, retained HAL/middlewar
 - [ ] Size/map delta reviewed for code, rodata, RAM, stack.
 - [ ] No unexpected HAL/middleware/std-library/float helper or `%f` formatting symbols.
 - [ ] ISR source acknowledged correctly and work is bounded.
-- [ ] Shared ISR/main state uses single-writer or minimal snapshot/publish critical sections.
+- [ ] Shared state review names writer, reader, IRQ priority/preemption path, and avoids global masking unless needed.
+- [ ] Necessary critical sections are minimal snapshot/publish regions only.
 - [ ] DMA buffer lifetime, alignment, channel, and ownership are explicit.
 - [ ] No active DMA uses stack or ambiguous ownership.
 - [ ] Register writes preserve reserved bits and clear flags correctly.

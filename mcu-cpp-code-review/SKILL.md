@@ -27,7 +27,8 @@ Review STM32F042 C++ for interrupt/DMA correctness, deterministic behavior, and 
 - Prefer STM32CubeF0 LL or direct register code in hot/size-critical paths; HAL is acceptable only when measured and useful.
 - Do not assume RTOS APIs, BASEPRI masking, D-cache maintenance, EEPROM, or M7-style cache coherency.
 - Treat `LDREX`/`STREX` lock-free designs as unavailable unless the exact target proves otherwise.
-- Require minimal interrupt-disabled critical sections: snapshot/update only, then unmask before parsing, HAL calls, loops, waits, logging, or flash writes. Natural-width single loads/stores are the only simple ISR/main communication.
+- Do not blindly disable interrupts. For shared state, first identify writer, reader, and preemption: STM32F042 has 2 priority bits, priority 0 is highest and 3 lowest. Use a minimal `PRIMASK` section only when a compound update can be observed or interrupted by a higher-priority IRQ path or by thread/ISR preemption.
+- Critical sections are snapshot/update only; unmask before parsing, HAL calls, loops, waits, logging, or flash writes. Natural-width single loads/stores are the only simple ISR/main communication.
 - Keep `volatile` limited to MMIO and ISR-observed flags; never treat it as atomicity.
 - Require DMA buffers with stable lifetime, explicit ownership, and documented alignment; reject active DMA into stack storage.
 - Require ISRs to acknowledge hardware, publish compact events, and defer heavy work to foreground code.

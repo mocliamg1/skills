@@ -14,7 +14,8 @@ Inspect map deltas for `.text`, `.rodata`, `.data`, `.bss`, stack, startup/stati
 
 ## Highest-Value Cuts
 
-- Replace HAL with LL/direct register code only where measurement shows size/latency/clutter wins.
+- Avoid new HAL in low-level paths by default. Prefer LL or raw registers for simple peripheral setup, IRQ/DMA control, and hot paths.
+- Replace existing HAL where map/timing/control-flow evidence shows bloat or hidden work; keep HAL only when it clearly reduces risk and its cost is acceptable.
 - Remove unused STM32CubeF0 modules, middleware, IRQ handlers, weak callbacks, and peripheral init from the build.
 - Compile out release strings; use event IDs/counters instead of formatting.
 - Remove float math from hot/ISR paths; fixed-point-convert values before logging and never keep `%f` in release logs.

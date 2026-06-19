@@ -1,31 +1,30 @@
-# Cortex-M0 C++ IRQ/DMA Review Guide
+# STM32F042 C++ IRQ/DMA Review Guide
 
-Use this as the expanded checklist for bare-metal Cortex-M0 C++ reviews. It is a practical local standard, not MISRA/AUTOSAR.
+Target: STM32F042x4/x6, Cortex-M0, up to 48 MHz, 16/32 KB flash, 6 KB SRAM with parity, 5 DMA channels, CRC unit, no D-cache, four NVIC priority levels. Treat "EEPROM" as flash emulation unless the board has external EEPROM.
 
-## Core Rules
+## Review Invariants
 
-- Target bare-metal Cortex-M0 unless code proves otherwise: no RTOS assumptions, BASEPRI masking, D-cache maintenance, or M7-style cache policy.
-- Optimize for deterministic execution, bounded latency, small binaries, explicit ownership, and reviewable concurrency.
-- Use C++ only where it adds type safety or compile-time checking without hidden runtime cost.
-- Prefer `constexpr`, `static_assert`, `enum class`, plain structs/classes, small RAII guards, fixed-size storage, and thin templates.
-- Avoid exceptions, RTTI, heap allocation, hosted-library features, recursion, hidden hardware-touching global constructors, and virtual dispatch in ISR/DMA/driver paths.
-- Treat `LDREX`/`STREX` lock-free designs as unavailable on Cortex-M0 unless the exact target/toolchain proves support.
-- Treat this as a focused C++ subset/profile: adopt rules that buy safety, size, and determinism; do not modernize code with features that add runtime or review cost.
+- Bare metal by default: no RTOS, no BASEPRI, no D-cache maintenance, no lock-free `LDREX`/`STREX` designs.
+- Use C++ as a small profile: `constexpr`, `static_assert`, fixed-width types, `enum class`, plain structs/classes, tiny RAII guards, fixed storage, thin templates.
+- Avoid exceptions, RTTI, heap use, iostreams, recursion, hidden global constructors, virtual dispatch, float math in hot paths, float formatting, and large header-only libraries in firmware paths.
+- Prefer STM32CubeF0 LL or direct registers for hot/size-critical code; HAL is acceptable only when it pays for itself in clarity and measured size/latency.
+- Preserve safety mechanisms: bounds checks, CRCs, DMA ownership, interrupt acknowledgement, flash-write power-loss handling.
 
-## Build and Size
+## Size and Build
 
 Check release builds for:
 
 ```text
--Os
--ffunction-sections
--fdata-sections
--fno-exceptions
--fno-rtti
--Wl,--gc-sections
+-Os -ffunction-sections -fdata-sections -Wl,--gc-sections
 ```
 
-Measure before/after nontrivial changes:
+Use only after compatibility/size checks:
+
+```text
+-flto -fno-exceptions -fno-rtti -fno-threadsafe-statics
+```
+
+Measure:
 
 ```sh
 arm-none-eabi-size firmware.elf
@@ -33,252 +32,73 @@ arm-none-eabi-nm --size-sort -S firmware.elf
 arm-none-eabi-objdump -h firmware.elf
 ```
 
-Review `.text`, `.rodata`, `.data`, `.bss`, stack usage, vector/startup code, library symbols, large strings/tables, float formatting, generic formatting, and linked HAL/vendor modules. Keep `-flto` only if measured compatible.
+Inspect `.text`, `.rodata`, `.data`, `.bss`, stack usage, retained HAL/middleware, USB/CAN stacks, printf/float support, startup/static init, vector table, and linker map deltas. Use `-Wl,--print-gc-sections` and `-Wl,--print-memory-usage` when explaining retained code.
 
-Useful diagnostics when investigating retained code:
+## Floating Point
 
-```text
--Wl,--print-gc-sections
--Wl,--print-memory-usage
-```
+- STM32F042/Cortex-M0 has no FPU; `float`/`double` arithmetic and `%f` formatting pull software helper/runtime code.
+- Flag float in ISRs, DMA callbacks, drivers, control loops, and logging paths unless timing and map deltas prove it acceptable.
+- Prefer fixed-point units such as mV, uA, centi-degrees, ppm, or Q-format values; convert to text with integer formatting.
+- Treat `double` as prohibited by default.
 
-## IRQs
+## IRQ Rules
 
-ISRs acknowledge hardware, capture minimal state, and publish compact foreground events.
+- ISR = acknowledge source, capture minimal state, publish event, exit.
+- Required comment: trigger, max work, shared state, DMA interaction.
+- Keep work bounded; no blocking, allocation, float math, complex logging, virtual dispatch, protocol parsing, or flash writes.
+- Centralize NVIC setup; document numeric priority and urgency. F0 has only four priority levels, so priority policy must be simple.
+- Handler mode uses the main stack; review ISR stack growth and nested interrupt assumptions.
 
-ISR contract comment:
+## DMA Rules
 
-```cpp
-// IRQ: UART0 receive
-// Trigger: RX-not-empty or error flag from UART0
-// Max work: read status, drain up to one byte, clear IRQ source, publish event
-// Shared data: uart0_rx_head, uart0_events
-// DMA: does not start or stop DMA
-extern "C" void UART0_IRQHandler();
-```
+- DMA buffers must be static or owned by long-lived objects; never stack.
+- State ownership explicitly: `CpuCanWrite`, `DmaTxActive`, `DmaRxActive`, `CpuCanRead`, `Error`.
+- Do not read RX or mutate TX buffers while DMA owns them.
+- Keep channel ownership auditable across the 5 channels.
+- Completion ISR publishes a compact event; foreground handles parsing/retry/error policy.
+- Align buffers/descriptors as required by the reference manual and peripheral width.
 
-- Keep ISRs short and bounded.
-- Clear or acknowledge the hardware interrupt source deterministically.
-- Read hardware status once when practical, then act on the snapshot.
-- Do not block, sleep, poll for long completion, or wait for another interrupt inside an ISR.
-- Do not allocate, use virtual dispatch, do complex formatting/logging, or call unbounded code.
-- Do not perform protocol parsing in an ISR unless it is tiny, bounded, and measured.
-- Publish events, counters, or buffer indices for the main loop to process.
-- Centralize NVIC priority setup; comment numeric priority and urgency.
+## Shared State
 
-```cpp
-// NVIC priority 0: highest urgency.
-// NVIC priority 3: lower urgency than 0.
-```
+- `volatile` only for MMIO and ISR-observed flags; it is not atomicity.
+- Simple shared operations: naturally aligned byte/halfword/word single load/store.
+- Compound updates, counters, ring push/pop pairs, and multi-field publishes require single-writer ownership or a tiny `PRIMASK` critical section.
+- Critical sections should only snapshot or publish shared state; move parsing, copying large buffers, HAL/LL calls, flash writes, waits, and loops outside the masked region.
+- One writer per ring index; define overflow policy.
+- Do not publish stack pointers or reuse DMA buffers before ownership returns.
 
-## DMA Guidelines
+## MMIO, Arithmetic, Init
 
-DMA is another bus master. Treat every DMA transaction as an ownership transfer between CPU code, the DMA controller, and the peripheral.
+- Use CMSIS/ST headers; isolate raw register casts in drivers.
+- Preserve reserved bits and follow rc_w1/rc_w0/toggle semantics from RM0091.
+- Use `__DMB`, `__DSB`, `__ISB` only with a hardware-ordering comment.
+- Review narrowing, signed/unsigned mixing, shifts, masks, and wraparound counters.
+- Use fixed underlying types for register-facing or persisted enums.
+- Prefer explicit startup initialization over hardware-touching globals or nontrivial local statics.
 
-- DMA buffers must have stable lifetime for the entire transaction.
-- Never start DMA using a stack buffer.
-- Separate descriptors/control blocks from data buffers when hardware supports it.
-- Represent buffer ownership and alignment explicitly.
-- Do not mutate a buffer while DMA owns it.
-- Do not read an RX buffer until completion returns ownership to CPU code.
-- Completion interrupts must publish compact events; foreground code performs expensive processing.
-- Keep DMA channel configuration centralized enough that channel ownership is auditable.
+## Flash-Emulated Settings
 
-Ownership sketch:
+- STM32F042 has flash and option bytes, not true internal EEPROM.
+- Review flash page erase/write granularity, wear, power-loss recovery, CRC/version/sequence, and separation from option bytes.
+- Never write flash from an ISR. Publish an event and commit from foreground when timing and voltage are safe.
 
-```cpp
-enum class DmaOwner : uint8_t {
-    CpuCanWrite,
-    DmaTxActive,
-    DmaRxActive,
-    CpuCanRead,
-    Error,
-};
+## Checklist
 
-struct DmaBuffer {
-    alignas(4) uint8_t bytes[128];
-    volatile DmaOwner owner;
-    volatile uint16_t length;
-};
-
-static DmaBuffer uart0_dma_rx;
-```
-
-Cortex-M0 parts normally do not have data cache. Do not add cached Cortex-M clean/invalidate calls unless the target changed and has a cache policy.
-
-## Shared Data Between ISR, DMA, and Main
-
-Prefer single-writer ownership and natural-width flags.
-
-Allowed patterns:
-
-- ISR writes a `volatile` flag; main loop reads and clears it inside a critical section.
-- ISR advances a ring-buffer head; main loop advances the tail.
-- DMA ISR sets a completion event; main loop consumes the completed buffer.
-- Main loop prepares a DMA buffer, then transfers ownership before enabling DMA.
-
-Avoid:
-
-- Shared read-modify-write without interrupt protection.
-- Multiple writers to the same variable.
-- Multi-byte shared state updated without a critical section.
-- Publishing pointers to stack data.
-- Using `volatile` as a substitute for atomicity.
-
-- Single naturally aligned byte, halfword, and word loads/stores are the only shared operations that should be treated as simple.
-- Any compound operation, multi-field update, counter increment, queue push/pop pair, or read-modify-write must use a critical section or a single-writer design.
-
-Critical-section helper:
-
-```cpp
-class IrqGuard {
-public:
-    IrqGuard() : primask_(__get_PRIMASK()) {
-        __disable_irq();
-    }
-
-    ~IrqGuard() {
-        if ((primask_ & 1u) == 0u) {
-            __enable_irq();
-        }
-    }
-
-    IrqGuard(const IrqGuard&) = delete;
-    IrqGuard& operator=(const IrqGuard&) = delete;
-
-private:
-    uint32_t primask_;
-};
-```
-
-IRQ-to-main event example:
-
-```cpp
-enum : uint32_t {
-    EventUartRx = 1u << 0,
-    EventDmaDone = 1u << 1,
-};
-
-static volatile uint32_t g_events;
-
-extern "C" void UART0_IRQHandler() {
-    const uint32_t status = UART0->STATUS;
-    UART0->STATUS = status; // Clear handled flags according to the device manual.
-
-    if ((status & UART_RX_READY) != 0u) {
-        g_events |= EventUartRx;
-    }
-}
-
-uint32_t take_events() {
-    IrqGuard lock;
-    const uint32_t events = g_events;
-    g_events = 0;
-    return events;
-}
-
-void main_loop_iteration() {
-    const uint32_t events = take_events();
-
-    if ((events & EventUartRx) != 0u) {
-        service_uart_rx();
-    }
-
-    if ((events & EventDmaDone) != 0u) {
-        service_completed_dma();
-    }
-}
-```
-
-## Register and Hardware Access
-
-- Keep `volatile` at the hardware boundary: MMIO registers and ISR-observed flags.
-- Do not make whole driver objects `volatile`.
-- Avoid casting arbitrary addresses throughout application code; isolate MMIO access in drivers.
-- Use named masks and typed enums for register fields.
-- Follow the vendor reference manual for write-one-to-clear, read-to-clear, and reserved-bit behavior.
-- Use CMSIS NVIC functions for interrupt enable, disable, pending state, and priority setup.
-- Use CMSIS instruction intrinsics such as `__DMB`, `__DSB`, and `__ISB` only when hardware ordering requires them.
-- Every barrier must have a comment explaining the hardware ordering requirement.
-
-Example:
-
-```cpp
-// Ensure descriptor writes reach memory before the DMA channel is enabled.
-__DMB();
-DMA0->CTRL = DMA_CTRL_ENABLE;
-```
-
-## Arithmetic and Initialization
-
-- Flag implicit narrowing, signed/unsigned mixing, unchecked counter wrap, and shifts wider than the underlying type.
-- Prefer fixed underlying types for persisted or register-facing enums.
-- Use `static_assert` for buffer sizes, register field widths, DMA alignment, and persistent-layout sizes.
-- Prefer compile-time initialization. Flag hardware-touching global constructors and nontrivial local statics in startup/driver paths.
-- If the project uses `-fno-threadsafe-statics`, verify local static initialization cannot race with interrupts or re-entry.
-
-## Architecture and Abstractions
-
-- Use ISR top halves plus foreground bottom halves. Foreground code owns parsing, retries, state transitions, and error policy.
-- Keep DMA transaction state explicit: `Idle`, `Prepared`, `Active`, `Complete`, `Error`.
-- Use one writer per ring-buffer index; define overflow policy.
-- Prefer explicit polling state machines for peripheral transactions.
-- Keep templates thin. Move parsing, formatting, retries, logging, and state machines into non-template `.cpp` functions.
-
-```cpp
-void write_bytes(const void* data, uint16_t length);
-
-template <typename T>
-inline void write_object(const T& value) {
-    static_assert(std::is_trivially_copyable<T>::value, "DMA/register payload must be plain data");
-    write_bytes(&value, sizeof(value));
-}
-```
-
-## Review Checklist
-
-### Size/Memory
-
-- [ ] Release build size report was reviewed.
-- [ ] Linker map delta was reviewed for `.text`, `.rodata`, `.data`, and `.bss`.
-- [ ] No unexpected standard-library symbols were introduced.
-- [ ] No float formatting was introduced.
-- [ ] No heap allocation was introduced in normal operation.
-- [ ] Stack growth is bounded and acceptable.
-- [ ] Static initialization did not add hidden runtime or ordering risk.
-
-### IRQ
-
-- [ ] Every ISR has the required header comment.
-- [ ] ISR work is short and bounded.
-- [ ] Hardware source is cleared or acknowledged correctly.
-- [ ] ISR does not block, allocate, or call complex formatting/logging.
-- [ ] Shared ISR/main data is natural-width single load/store or protected by a critical section.
-- [ ] NVIC priority comments use numeric priority and urgency wording.
-
-### DMA
-
-- [ ] DMA buffers have stable lifetime and documented alignment.
-- [ ] No active DMA uses stack storage.
-- [ ] Buffer ownership state is explicit.
-- [ ] CPU does not read/write buffers while DMA owns them.
-- [ ] DMA completion path publishes a compact event.
-- [ ] Error and cancellation paths return ownership deterministically.
-
-### Hardware
-
-- [ ] MMIO access is isolated in driver code.
-- [ ] `volatile` is limited to registers and ISR-observed flags.
-- [ ] Barriers, if used, have a hardware-ordering comment.
-- [ ] Reserved register bits are preserved as required by the vendor manual.
-- [ ] Narrowing, overflow, shift, and enum-underlying-type risks were reviewed.
+- [ ] Size/map delta reviewed for code, rodata, RAM, stack.
+- [ ] No unexpected HAL/middleware/std-library/float helper or `%f` formatting symbols.
+- [ ] ISR source acknowledged correctly and work is bounded.
+- [ ] Shared ISR/main state uses single-writer or minimal snapshot/publish critical sections.
+- [ ] DMA buffer lifetime, alignment, channel, and ownership are explicit.
+- [ ] No active DMA uses stack or ambiguous ownership.
+- [ ] Register writes preserve reserved bits and clear flags correctly.
+- [ ] Arithmetic/init/template bloat risks reviewed.
+- [ ] Flash-emulated settings are power-loss and wear safe.
 
 ## References
 
-- [CMSIS-Core NVIC interrupt and exception APIs](https://arm-software.github.io/CMSIS_5/Core/html/group__NVIC__gr.html)
-- [CMSIS-Core intrinsic CPU instructions](https://arm-software.github.io/CMSIS_6/main/Core/group__intrinsic__CPU__gr.html)
-- [GCC optimization options](https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html)
-- [GCC C++ dialect options](https://gcc.gnu.org/onlinedocs/gcc/C_002b_002b-Dialect-Options.html)
-- [GNU linker options, including `--gc-sections` and map files](https://sourceware.org/binutils/docs/ld/Options.html)
-- [C++ Core Guidelines](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines)
-- [AUTOSAR C++14 Guidelines](https://www.autosar.org/fileadmin/standards/R17-10_R1.2.0/AP/AUTOSAR_RS_CPP14Guidelines.pdf)
+- STM32F042x4/x6 datasheet: https://www.st.com/resource/en/datasheet/stm32f042c4.pdf
+- STM32F0x1/F0x2/F0x8 reference manual RM0091: https://www.st.com/resource/en/reference_manual/rm0091-stm32f0x1stm32f0x2stm32f0x8-advanced-armbased-32bit-mcus-stmicroelectronics.pdf
+- STM32F0 Cortex-M0 programming manual PM0215: https://www.st.com/resource/en/programming_manual/pm0215-stm32f0-series-cortexm0-programming-manual-stmicroelectronics.pdf
+- STM32CubeF0 HAL/LL package: https://www.st.com/en/embedded-software/stm32cubef0.html
+- CMSIS intrinsics: https://arm-software.github.io/CMSIS_6/main/Core/group__intrinsic__CPU__gr.html
+- GCC/ld options: https://gcc.gnu.org/onlinedocs/gcc/ and https://sourceware.org/binutils/docs/ld/Options.html

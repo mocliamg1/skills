@@ -1,11 +1,11 @@
 ---
 name: mcu-cpp-code-review
-description: Review bare-metal MCU C++ firmware, especially Cortex-M0 IRQs, DMA, MMIO, ISR/main shared state, fixed buffers, and low-flash builds. Use for code review or audit of races, DMA ownership, volatile/critical-section correctness, ISR latency, stack/heap/flash use, template/STL bloat, and embedded C++ risks.
+description: Review STM32F042/Cortex-M0 bare-metal C++ firmware, especially IRQs, 5-channel DMA, MMIO, ISR/main shared state, fixed buffers, 16/32 KB flash, 6 KB SRAM, and STM32CubeF0 HAL/LL code. Use for audits of races, DMA ownership, volatile/critical-section correctness, ISR latency, stack/heap/flash use, template/STL bloat, flash-emulated settings, and embedded C++ risks.
 ---
 
-# MCU C++ Code Review
+# STM32F042 C++ Code Review
 
-Review bare-metal MCU C++ for interrupt/DMA correctness, deterministic behavior, and flash/RAM discipline. For nontrivial reviews or exact policy, read `references/cortex_m0_cpp_irq_dma_guidelines.md`.
+Review STM32F042 C++ for interrupt/DMA correctness, deterministic behavior, and flash/RAM discipline. For nontrivial reviews or exact policy, read `references/cortex_m0_cpp_irq_dma_guidelines.md`.
 
 ## Review Workflow
 
@@ -21,17 +21,21 @@ Review bare-metal MCU C++ for interrupt/DMA correctness, deterministic behavior,
 - **P2**: Robustness issue that can become a bug: missing ISR contract, ambiguous ownership, unclear NVIC priority, narrowing/overflow risk, template/code-size risk, weak validation.
 - **P3**: Minor clarity or optional cleanup; do not let these dominate.
 
-## Cortex-M0 Checks
+## STM32F042 Checks
 
-- Do not assume RTOS APIs, BASEPRI masking, D-cache maintenance, or M7-style cache coherency on Cortex-M0.
+- Treat the budget as tight: 16/32 KB flash, 6 KB SRAM, Cortex-M0 up to 48 MHz, 5 DMA channels, no D-cache.
+- Prefer STM32CubeF0 LL or direct register code in hot/size-critical paths; HAL is acceptable only when measured and useful.
+- Do not assume RTOS APIs, BASEPRI masking, D-cache maintenance, EEPROM, or M7-style cache coherency.
 - Treat `LDREX`/`STREX` lock-free designs as unavailable unless the exact target proves otherwise.
-- Require tiny interrupt-disabled critical sections for compound shared-state operations; natural-width single loads/stores are the only simple ISR/main communication.
+- Require minimal interrupt-disabled critical sections: snapshot/update only, then unmask before parsing, HAL calls, loops, waits, logging, or flash writes. Natural-width single loads/stores are the only simple ISR/main communication.
 - Keep `volatile` limited to MMIO and ISR-observed flags; never treat it as atomicity.
 - Require DMA buffers with stable lifetime, explicit ownership, and documented alignment; reject active DMA into stack storage.
 - Require ISRs to acknowledge hardware, publish compact events, and defer heavy work to foreground code.
-- Flag blocking, heap allocation, complex formatting, virtual dispatch, unbounded parsing, and hidden flash bloat in ISR/driver paths.
+- Flag blocking, heap allocation, float math, complex formatting, virtual dispatch, unbounded parsing, and hidden flash bloat in ISR/driver paths.
+- Treat Cortex-M0 floating point as software-emulated: allow only outside hot/ISR paths when timing and map deltas are acceptable; prefer fixed-point and forbid `%f` in release logging.
 - Flag implicit narrowing, signed/unsigned mixing, overflow-prone counters, and shifts/masks that rely on undefined or implementation-defined behavior.
 - Flag dynamic initialization of globals or local statics in startup/driver paths unless it is intentional, bounded, and measured.
+- If code says EEPROM, check whether it is actually flash emulation and review page erase, wear, power-loss safety, and option-byte separation.
 
 ## Size Checks
 

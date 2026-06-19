@@ -1,0 +1,4 @@
+interface:
+  display_name: "MCU C++ KISS"
+  short_description: "Simplify and debloat MCU C++ firmware"
+  default_prompt: "Use $mcu-cpp-kiss to simplify and debloat this MCU C++ firmware while preserving behavior."

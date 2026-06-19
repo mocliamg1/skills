@@ -1,0 +1,4 @@
+interface:
+  display_name: "MCU C++ Code Review"
+  short_description: "Review Cortex-M0 C++ IRQ and DMA firmware"
+  default_prompt: "Use $mcu-cpp-code-review to review this Cortex-M0 C++ firmware change for IRQ, DMA, memory, and code-size risks."
